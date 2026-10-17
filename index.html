@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WH40k — Tavolo remoto</title>
+  
+    <meta name="robots" content="noindex, nofollow" />
+    <style>
+      #unlock { position: fixed; inset: 0; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; margin: 0; background: #0f172a; color: #e2e8f0; }
+      #unlock[hidden] { display: none; }
+      #unlock form { display: flex; flex-direction: column; gap: 12px; width: min(320px, calc(100vw - 32px)); }
+      #unlock h1 { font-size: 20px; margin: 0 0 4px; }
+      #unlock input, #unlock button { font: inherit; padding: 8px 10px; border-radius: 6px; border: 1px solid #555; }
+      #unlock input { background: #111; color: inherit; }
+      #unlock button { background: #3b6fb6; color: #fff; border-color: #3b6fb6; cursor: pointer; }
+      #unlock button:disabled { opacity: 0.6; cursor: default; }
+      #unlock label.remember { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+      #unlock .error { color: #ff8a80; font-size: 14px; min-height: 1.2em; margin: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="unlock" hidden>
+      <form>
+        <h1>WH40k — Tavolo remoto</h1>
+        <input type="password" name="password" placeholder="Password" autocomplete="current-password" required autofocus />
+        <label class="remember"><input type="checkbox" name="remember" checked /> Ricorda su questo dispositivo</label>
+        <button type="submit">Entra</button>
+        <p class="error" role="alert"></p>
+      </form>
+    </div>
+    <div id="root"></div>
+    <script type="module">
+      const ITERATIONS = 600000
+      const SALT = "wh40k-tavolo-v1"
+      const STORAGE_KEY = "wh40k-site-key"
+      const enc = new TextEncoder()
+
+      const storage = {
+        get() { try { return localStorage.getItem(STORAGE_KEY) } catch { return null } },
+        set(v) { try { localStorage.setItem(STORAGE_KEY, v) } catch { /* private mode */ } },
+        clear() { try { localStorage.removeItem(STORAGE_KEY) } catch { /* private mode */ } },
+      }
+      const toB64 = (bytes) => btoa(String.fromCharCode(...bytes))
+      const fromB64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0))
+
+      async function deriveRaw(password) {
+        const base = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits'])
+        const bits = await crypto.subtle.deriveBits(
+          { name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode(SALT), iterations: ITERATIONS }, base, 256)
+        return new Uint8Array(bits)
+      }
+
+      let bundle
+      async function decrypt(raw) {
+        bundle ??= new Uint8Array(await (await fetch('./app.bin', { cache: 'no-cache' })).arrayBuffer())
+        const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt'])
+        const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bundle.slice(0, 12) }, key, bundle.slice(12))
+        return JSON.parse(new TextDecoder().decode(plain))
+      }
+
+      function start({ js, css }) {
+        document.getElementById('unlock').remove()
+        const style = document.createElement('style')
+        style.textContent = css
+        document.head.append(style)
+        const script = document.createElement('script')
+        script.type = 'module'
+        script.src = URL.createObjectURL(new Blob([js], { type: 'text/javascript' }))
+        document.body.append(script)
+      }
+
+      function ask() {
+        const box = document.getElementById('unlock')
+        const form = box.querySelector('form')
+        const error = box.querySelector('.error')
+        const button = form.querySelector('button')
+        box.hidden = false
+        form.password.focus()
+        form.addEventListener('submit', async (e) => {
+          e.preventDefault()
+          button.disabled = true
+          error.textContent = ''
+          try {
+            const raw = await deriveRaw(form.password.value)
+            const app = await decrypt(raw)
+            if (form.remember.checked) storage.set(toB64(raw))
+            start(app)
+          } catch {
+            error.textContent = 'Password errata.'
+            button.disabled = false
+            form.password.select()
+          }
+        })
+      }
+
+      // "?esci" forgets the password on this device.
+      const url = new URL(location.href)
+      if (url.searchParams.has('esci')) {
+        storage.clear()
+        url.searchParams.delete('esci')
+        history.replaceState(null, '', url)
+      }
+      const saved = storage.get()
+      if (saved) {
+        decrypt(fromB64(saved)).then(start, () => { storage.clear(); ask() })
+      } else {
+        ask()
+      }
+    </script>
+  </body>
+</html>
